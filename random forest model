@@ -1,0 +1,91 @@
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split, RandomizedSearchCV
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score, classification_report
+from sklearn.preprocessing import StandardScaler
+from imblearn.over_sampling import SMOTE
+import gc
+
+# Load training dataset
+train_df = pd.read_csv('train.csv')
+
+# Drop columns with excessive missing values or irrelevant information
+train_df.drop(columns=['trip_ID', 'special_requirements'], inplace=True)
+train_df.dropna(subset=['category'], inplace=True)
+
+# Impute missing values and feature engineering
+train_df['female_count'] = train_df['female_count'].fillna(train_df['female_count'].median())
+train_df['male_count'] = train_df['male_count'].fillna(train_df['male_count'].median())
+train_df['female_to_male_ratio'] = train_df['female_count'] / (train_df['male_count'] + 1)
+train_df['total_people'] = train_df['female_count'] + train_df['male_count']
+
+# Categorical processing and encoding
+categorical_cols = train_df.select_dtypes(include=['object']).columns
+train_df[categorical_cols] = train_df[categorical_cols].fillna('Unknown')
+train_df = pd.get_dummies(train_df, columns=categorical_cols, drop_first=True)
+
+# Prepare features (X) and target (y)
+X = train_df.drop(columns=['category'])
+y = train_df['category']
+numerical_cols = X.select_dtypes(include=['float64', 'int64']).columns
+scaler = StandardScaler()
+X[numerical_cols] = scaler.fit_transform(X[numerical_cols])
+
+# Handle class imbalance
+smote = SMOTE(random_state=42)
+X_res, y_res = smote.fit_resample(X, y)
+
+# Split the dataset into training and validation sets
+X_train, X_val, y_train, y_val = train_test_split(X_res, y_res, test_size=0.2, random_state=42)
+
+# Initialize RandomForestClassifier with adjustments for accuracy
+rf = RandomForestClassifier(
+    random_state=42,
+    class_weight='balanced_subsample',  # Adjust for class imbalance
+    n_estimators=350,                   # Increase trees for stability
+    min_samples_split=5,                # Restrict splits to prevent overfitting
+    min_samples_leaf=2,                 # Keep leaf nodes small for details
+    max_features='sqrt'
+)
+
+# Define a reduced parameter grid for RandomizedSearchCV
+param_grid = {
+    'max_depth': [10, 15, None],
+}
+
+# Set up RandomizedSearchCV with reduced parameters
+random_search = RandomizedSearchCV(estimator=rf, param_distributions=param_grid, cv=3,
+                                   scoring='accuracy', n_jobs=-1, verbose=2, n_iter=10, random_state=42)
+random_search.fit(X_train, y_train)
+
+# Evaluate the best model from RandomizedSearchCV
+best_model = random_search.best_estimator_
+y_pred = best_model.predict(X_val)
+val_accuracy = accuracy_score(y_val, y_pred)
+print(f"Validation Accuracy: {val_accuracy}")
+print("Classification Report:\n", classification_report(y_val, y_pred))
+
+# Load and prepare test data
+test_df = pd.read_csv('test.csv')
+test_df.drop(columns=['trip_ID', 'special_requirements'], inplace=True)
+test_df['female_count'] = test_df['female_count'].fillna(test_df['female_count'].median())
+test_df['male_count'] = test_df['male_count'].fillna(test_df['male_count'].median())
+test_df['female_to_male_ratio'] = test_df['female_count'] / (test_df['male_count'] + 1)
+test_df['total_people'] = test_df['female_count'] + test_df['male_count']
+test_df[categorical_cols] = test_df[categorical_cols].fillna('Unknown')
+test_df = pd.get_dummies(test_df, columns=categorical_cols, drop_first=True)
+test_df = test_df.reindex(columns=X.columns, fill_value=0)
+test_df[numerical_cols] = scaler.transform(test_df[numerical_cols])
+
+# Predictions on test data
+pred_probs = best_model.predict_proba(test_df)
+results = pd.DataFrame({
+    'trip_ID': pd.read_csv('test.csv')['trip_ID'],
+    'category': np.argmax(pred_probs, axis=1)
+})
+
+# Save predictions
+results.to_csv('predictions_final_rf.csv', index=False)
+gc.collect()
+#accuracy 0.71164
